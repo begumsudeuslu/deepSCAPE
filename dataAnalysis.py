@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import re
-import requests
 from typing import List, Dict, Set, Tuple
+import requests
 
 
 _mirna_regex = re.compile(
@@ -414,43 +414,88 @@ def build_mirna_target_distribution(matched_file, output_excel):
         print(f"An error occurred: {e}")
 
 
+def symbol_to_ensembl(symbols, species="hsa"):
+    url="https://rest.ensembl.org/xrefs/symbol/{}/".format(species)
+    headers={"Content-Type": "application/json"}
+
+    results=[]
+
+    for i, sym in enumerate(symbols, start=1):
+        try:
+            r=requests.get(url+ sym,headers=headers, timeout=10)
+            r.raise_for_status()
+            data=r.json()
+
+            if data:
+                ensembl_id=data[0]["id"]
+            else:
+                ensembl_id=None
+
+            print(f"[{i}/{len(symbols)}] {sym} → {ensembl_id}")
+            
+            results.append((sym, ensembl_id))
+
+        except Exception as e:
+            print(f"Hata: {sym} için {e}")
+            results.append((sym, None))
+        
+        time.sleep(0.1)  #küçük bekleme
+    
+    return pd.DataFrame(results, columns=["symbol", "ensembl_id"])
+
+
+def turn_symbol_to_ensembl(input_file, output_file):
+    df = pd.read_csv(input_file)
+    df_hsa = df[df["Species (Target Gene)"] == "hsa"].copy()
+
+    symbols = df_hsa["Target Gene"].unique().tolist()
+
+    mapping = symbol_to_ensembl(symbols, species="human")
+
+    # Orijinal tabloya ekleyelim
+    df = df.merge(mapping, left_on="Target Gene", right_on="symbol", how="left")
+    df.to_csv(output_file, index=False)
+
+    print("Bitti! Çıktı: mirTarBase_with_ensembl.csv")
+
+
+def build_mirna_target_excel(mirna_file:str, mrna_file:str, output_excel:str):
+    mirna_df=pd.read_csv(mirna_file)
+
+    if "Species (miRNA)" in mirna_df.columns:
+        mirna_df = mirna_df[mirna_df["Species (miRNA)"] == "hsa"]
+    
+    if "miRNA" not in mirna_df.columns or "ensembl_id" not in mirna_df.columns:
+        raise ValueError("mirna_file içinde 'miRNA' ve 'ensembl_id' columnları olmalı")
+    
+    mrna_df=pd.read_csv(mrna_file, sep='\t')
+    genes = set(mrna_df.iloc[:, 0].astype(str).str.split(".").str[0])   #versiyonsuz hale getiririz
+
+    results=[]
+    for mirna, group in mirna_df.groupby("miRNA"):
+        targets = set(group["ensembl_id"].dropna().astype(str).str.split(".").str[0])
+        common_targets = targets.intersection(genes)
+
+        results.append({
+            "miRNA": mirna,
+            "Target_Count": len(common_targets),
+            "Target_List":",".join(sorted(common_targets)) if common_targets else ""
+        })
+
+    all_mirnas=set(mirna_df["miRNA"].unique())
+    existing = set(r["miRNA"] for r in results)
+
+    for mirna in all_mirnas-existing:
+        results.append({"miRNA": mirna, "Target_Count": 0, "Target_List": ""})
+    
+    results_df = pd.DataFrame(results)
+    results_df.to_excel(output_excel, index=False)
+    print(f"miRNA target Excel kaydedildi: {output_excel}")
+
 
 
 if __name__=="__main__":
-
-    mRNA_file=r"TCGA-BRCA.star_fpkm-uq.tsv"
-    df_mRNA=pd.read_csv(mRNA_file, sep="\t")
-
-    miRNA_file=r"TCGA-BRCA.mirna.tsv"
-    df_miRNA=pd.read_csv(miRNA_file, sep="\t")
-
-    check_TCGA_cols(df_mRNA, "cheked_mRNA")
-    check_TCGA_cols(df_miRNA, "checked_miRNA")
-
-    df_mRNA_cleaned = remove_normal_samples(df_mRNA)
-    df_mRNA_cleaned.to_csv("mRNA_no_normal.tsv", sep='\t', index=False)
-
-    df_miRNA_cleaned = remove_normal_samples(df_miRNA)
-    df_miRNA_cleaned.to_csv("miRNA_no_normal.tsv", sep='\t', index=False)
     
-
-     
-    matched_mRNA_df, matched_miRNA_df, matched_patients = macthed_samples(df_mRNA_cleaned, df_miRNA_cleaned)
-    
-    matched_miRNA_df = low_expression_filtering(matched_miRNA_df, thresold=0.8)  
-    
-    matched_mRNA_df.to_csv("matched_mRNA.tsv", sep='\t', index=False)
-    matched_miRNA_df.to_csv("matched_miRNA.tsv", sep='\t', index=False)
-
-    calculate_gene_wise(matched_mRNA_df, "gene_wise_mRNA.xlsx")
-    calculate_gene_wise(matched_miRNA_df, "gene_wise_miRNA.xlsx")
-
-    calculate_sample_wise(matched_mRNA_df, "sample_wise_mRNA.xlsx")
-    calculate_sample_wise(matched_miRNA_df, "sample_wise_miRNA.xlsx")
-
-    plot_gene_expression_density("gene_wise_mRNA.xlsx", "gene_wise_miRNA.xlsx", "gene_expression_density.png")
-    plot_full_expression_density("matched_mRNA.tsv", "matched_miRNA.tsv", "gene_expression_density.png")
-
     smart_match_mirtarbase(
     miRNA_file="matched_miRNA.tsv",         
     miRTarBase_file="MicroRNA_Target_Sites.csv", 
@@ -463,6 +508,12 @@ if __name__=="__main__":
         matched_file="matched_targets.csv", 
         output_excel="miRNA_target_distribution.xlsx"
     )
+
+    #turn_symbol_to_ensembl("MicroRNA_Target_Sites.csv", "mirTarBase_with_ensembl.csv")
+
+    build_mirna_target_excel("mirTarBase_with_ensembl.csv", "matched_mRNA.tsv", "miRNA_targets_in_TCGA.xlsx")
+
+
 
 
 
